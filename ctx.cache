@@ -1,0 +1,866 @@
+please write all the above to files in this workspace as you see fit - create whatever you need
+
+I want to do teachings for our engineers to get them this core knowledge of how containers work under the hood. how that ties into linux in general etc. include a note to make some teachings for how linux is file based too (file descriptors, etc, what else uses these like sockets, etc) 
+
+Read file: container_runtime.md
+Ran tool
+Based on my research, I'll now update the container runtime implementation plan to include the concepts from Sean Wingert's video about containers, cgroups, Linux kernel namespaces, UFS, Docker, and Kubernetes pods.
+Read file: ctx.cache
+Here's the updated container runtime implementation plan that incorporates the concepts from the video:
+
+```
+# Container Runtime Implementation Plan
+
+## 1. OCI Runtime Spec Compliance
+
+### 1.1 Bundle Structure
+```
+bundle/
+├── config.json     # Container configuration
+├── state.json      # Runtime state (generated)
+└── rootfs/         # Container filesystem
+```
+
+### 1.2 Config.json Schema Implementation
+[Already detailed in your existing plan]
+
+### 1.3 State Management
+[Already detailed in your existing plan]
+
+### 1.4 Runtime Lifecycle Commands
+[Already detailed in your existing plan]
+
+### 1.5 Hook Execution
+[Already detailed in your existing plan]
+
+### 1.6 Bundle Validation
+[Already detailed in your existing plan]
+
+## 2. Namespace Isolation Implementation
+
+### 2.1 PID Namespace
+```go
+func setupPIDNamespace() error {
+    // Clone with CLONE_NEWPID flag
+    // This creates a new PID namespace where the first process gets PID 1
+    if err := syscall.Unshare(syscall.CLONE_NEWPID); err != nil {
+        return fmt.Errorf("failed to unshare PID namespace: %v", err)
+    }
+    
+    // Mount a new proc filesystem to reflect the new PID namespace
+    if err := syscall.Mount("proc", "/proc", "proc", 0, ""); err != nil {
+        return fmt.Errorf("failed to mount proc filesystem: %v", err)
+    }
+    
+    return nil
+}
+```
+
+### 2.2 Mount Namespace
+```go
+func setupMountNamespace(rootfs string) error {
+    // Create a new mount namespace
+    if err := syscall.Unshare(syscall.CLONE_NEWNS); err != nil {
+        return fmt.Errorf("failed to unshare mount namespace: %v", err)
+    }
+    
+    // Make all current mounts private to prevent propagation
+    if err := syscall.Mount("none", "/", "", syscall.MS_REC|syscall.MS_PRIVATE, ""); err != nil {
+        return fmt.Errorf("failed to make mounts private: %v", err)
+    }
+    
+    // Perform pivot_root to change root filesystem
+    if err := pivotRoot(rootfs); err != nil {
+        return fmt.Errorf("failed to pivot root: %v", err)
+    }
+    
+    return nil
+}
+
+func pivotRoot(newRoot string) error {
+    // Mount the newRoot as MS_BIND to itself to satisfy pivot_root requirements
+    if err := syscall.Mount(newRoot, newRoot, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
+        return fmt.Errorf("failed to bind mount rootfs: %v", err)
+    }
+    
+    // Create a temporary directory to store the old root
+    pivotDir := filepath.Join(newRoot, ".pivot_root")
+    if err := os.Mkdir(pivotDir, 0700); err != nil {
+        return fmt.Errorf("failed to create pivot_root dir: %v", err)
+    }
+    
+    // Pivot the root
+    if err := syscall.PivotRoot(newRoot, pivotDir); err != nil {
+        return fmt.Errorf("failed to pivot_root: %v", err)
+    }
+    
+    // Change to the new root
+    if err := os.Chdir("/"); err != nil {
+        return fmt.Errorf("failed to chdir to new root: %v", err)
+    }
+    
+    // Unmount the old root and remove the temporary directory
+    pivotDir = "/.pivot_root"
+    if err := syscall.Unmount(pivotDir, syscall.MNT_DETACH); err != nil {
+        return fmt.Errorf("failed to unmount old root: %v", err)
+    }
+    
+    if err := os.RemoveAll(pivotDir); err != nil {
+        return fmt.Errorf("failed to remove pivot_root dir: %v", err)
+    }
+    
+    return nil
+}
+```
+
+### 2.3 Network Namespace
+```go
+func setupNetworkNamespace() error {
+    // Create a new network namespace
+    if err := syscall.Unshare(syscall.CLONE_NEWNET); err != nil {
+        return fmt.Errorf("failed to unshare network namespace: %v", err)
+    }
+    
+    // Setup loopback interface
+    if err := setupLoopback(); err != nil {
+        return fmt.Errorf("failed to setup loopback: %v", err)
+    }
+    
+    return nil
+}
+
+func setupLoopback() error {
+    // Use netlink to bring up the loopback interface
+    link, err := netlink.LinkByName("lo")
+    if err != nil {
+        return fmt.Errorf("failed to find loopback interface: %v", err)
+    }
+    
+    if err := netlink.LinkSetUp(link); err != nil {
+        return fmt.Errorf("failed to set loopback up: %v", err)
+    }
+    
+    return nil
+}
+```
+
+### 2.4 UTS Namespace
+```go
+func setupUTSNamespace(hostname string) error {
+    // Create a new UTS namespace
+    if err := syscall.Unshare(syscall.CLONE_NEWUTS); err != nil {
+        return fmt.Errorf("failed to unshare UTS namespace: %v", err)
+    }
+    
+    // Set the hostname
+    if err := syscall.Sethostname([]byte(hostname)); err != nil {
+        return fmt.Errorf("failed to set hostname: %v", err)
+    }
+    
+    return nil
+}
+```
+
+### 2.5 IPC Namespace
+```go
+func setupIPCNamespace() error {
+    // Create a new IPC namespace
+    if err := syscall.Unshare(syscall.CLONE_NEWIPC); err != nil {
+        return fmt.Errorf("failed to unshare IPC namespace: %v", err)
+    }
+    
+    return nil
+}
+```
+
+### 2.6 User Namespace
+```go
+func setupUserNamespace(uid, gid int) error {
+    // Create a new user namespace
+    if err := syscall.Unshare(syscall.CLONE_NEWUSER); err != nil {
+        return fmt.Errorf("failed to unshare user namespace: %v", err)
+    }
+    
+    // Write UID/GID mappings
+    if err := writeIDMapping("uid_map", uid); err != nil {
+        return fmt.Errorf("failed to write uid mapping: %v", err)
+    }
+    
+    if err := writeIDMapping("gid_map", gid); err != nil {
+        return fmt.Errorf("failed to write gid mapping: %v", err)
+    }
+    
+    return nil
+}
+
+func writeIDMapping(file string, id int) error {
+    path := fmt.Sprintf("/proc/self/%s", file)
+    mapping := fmt.Sprintf("0 %d 1", id)
+    
+    return ioutil.WriteFile(path, []byte(mapping), 0644)
+}
+```
+
+## 3. Resource Management with cgroups
+
+### 3.1 cgroup v2 Setup
+```go
+func setupCgroupV2(containerID string, resources *Resources) error {
+    // Path to the cgroup
+    cgroupPath := filepath.Join("/sys/fs/cgroup", containerID)
+    
+    // Create cgroup directory
+    if err := os.Mkdir(cgroupPath, 0755); err != nil {
+        return fmt.Errorf("failed to create cgroup directory: %v", err)
+    }
+    
+    // Set memory limit
+    if resources.Memory > 0 {
+        memoryMaxPath := filepath.Join(cgroupPath, "memory.max")
+        if err := ioutil.WriteFile(memoryMaxPath, []byte(fmt.Sprintf("%d", resources.Memory)), 0644); err != nil {
+            return fmt.Errorf("failed to set memory limit: %v", err)
+        }
+    }
+    
+    // Set CPU limit
+    if resources.CPU > 0 {
+        cpuMaxPath := filepath.Join(cgroupPath, "cpu.max")
+        // Format: quota period
+        cpuLimit := fmt.Sprintf("%d 100000", resources.CPU*100000)
+        if err := ioutil.WriteFile(cpuMaxPath, []byte(cpuLimit), 0644); err != nil {
+            return fmt.Errorf("failed to set CPU limit: %v", err)
+        }
+    }
+    
+    // Add process to cgroup
+    pid := os.Getpid()
+    procsPath := filepath.Join(cgroupPath, "cgroup.procs")
+    if err := ioutil.WriteFile(procsPath, []byte(fmt.Sprintf("%d", pid)), 0644); err != nil {
+        return fmt.Errorf("failed to add process to cgroup: %v", err)
+    }
+    
+    return nil
+}
+```
+
+### 3.2 cgroup Hierarchy Management
+```go
+func setupCgroupHierarchy(containerID string, parentCgroup string) error {
+    // Create a nested cgroup structure for the container
+    // This allows for better organization and resource management
+    
+    // Define paths
+    basePath := "/sys/fs/cgroup"
+    containerPath := filepath.Join(basePath, parentCgroup, containerID)
+    
+    // Create container cgroup directory
+    if err := os.MkdirAll(containerPath, 0755); err != nil {
+        return fmt.Errorf("failed to create container cgroup: %v", err)
+    }
+    
+    // Create subsystem directories if using cgroup v1
+    // For cgroup v2, all controllers are unified
+    
+    return nil
+}
+```
+
+### 3.3 Resource Limits Implementation
+```go
+type ResourceLimits struct {
+    // Memory limits in bytes
+    MemoryLimit      uint64
+    MemorySoftLimit  uint64
+    MemorySwapLimit  uint64
+    
+    // CPU limits
+    CPUShares        uint64  // Relative share (1024 is default)
+    CPUPeriod        uint64  // Period in microseconds
+    CPUQuota         uint64  // Quota in microseconds
+    CPUSetCPUs       string  // CPUs to use (e.g., "0-3,5")
+    
+    // Block IO limits
+    BlkioWeight      uint16  // Weight for block IO (between 10 and 1000)
+    
+    // PID limits
+    PidsMax          int64   // Maximum number of PIDs
+}
+
+func applyCgroupLimits(cgroupPath string, limits ResourceLimits) error {
+    // Apply memory limits
+    if limits.MemoryLimit > 0 {
+        if err := writeFile(filepath.Join(cgroupPath, "memory.max"), fmt.Sprintf("%d", limits.MemoryLimit)); err != nil {
+            return err
+        }
+    }
+    
+    // Apply CPU limits
+    if limits.CPUQuota > 0 {
+        cpuMax := fmt.Sprintf("%d %d", limits.CPUQuota, limits.CPUPeriod)
+        if err := writeFile(filepath.Join(cgroupPath, "cpu.max"), cpuMax); err != nil {
+            return err
+        }
+    }
+    
+    // Apply CPU set constraints
+    if limits.CPUSetCPUs != "" {
+        if err := writeFile(filepath.Join(cgroupPath, "cpuset.cpus"), limits.CPUSetCPUs); err != nil {
+            return err
+        }
+    }
+    
+    // Apply PID limits
+    if limits.PidsMax > 0 {
+        if err := writeFile(filepath.Join(cgroupPath, "pids.max"), fmt.Sprintf("%d", limits.PidsMax)); err != nil {
+            return err
+        }
+    }
+    
+    return nil
+}
+
+func writeFile(path, data string) error {
+    return ioutil.WriteFile(path, []byte(data), 0644)
+}
+```
+
+## 4. Filesystem Operations
+
+### 4.1 UnionFS / OverlayFS Setup
+```go
+func setupOverlayFS(layers []string, upperDir, workDir, mergedDir string) error {
+    // Prepare lower directories string (image layers)
+    var lowerDirs []string
+    for _, layer := range layers {
+        lowerDirs = append(lowerDirs, layer)
+    }
+    
+    lowerDirsStr := strings.Join(lowerDirs, ":")
+    
+    // Mount overlayfs
+    options := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lowerDirsStr, upperDir, workDir)
+    if err := syscall.Mount("overlay", mergedDir, "overlay", 0, options); err != nil {
+        return fmt.Errorf("failed to mount overlay: %v", err)
+    }
+    
+    return nil
+}
+```
+
+### 4.2 Root Filesystem Setup
+```go
+func prepareRootfs(rootfs string, mounts []Mount) error {
+    // Create necessary directories
+    for _, dir := range []string{"/proc", "/sys", "/dev", "/etc", "/tmp"} {
+        path := filepath.Join(rootfs, dir)
+        if err := os.MkdirAll(path, 0755); err != nil {
+            return fmt.Errorf("failed to create directory %s: %v", path, err)
+        }
+    }
+    
+    // Perform bind mounts
+    for _, mount := range mounts {
+        dest := filepath.Join(rootfs, mount.Destination)
+        
+        // Create parent directories if they don't exist
+        if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+            return fmt.Errorf("failed to create mount point directory: %v", err)
+        }
+        
+        // Create the actual mount point if it doesn't exist
+        if _, err := os.Stat(dest); os.IsNotExist(err) {
+            var file *os.File
+            if file, err = os.Create(dest); err != nil {
+                return fmt.Errorf("failed to create mount point: %v", err)
+            }
+            file.Close()
+        }
+        
+        // Perform the mount
+        flags := uintptr(0)
+        if mount.Readonly {
+            flags |= syscall.MS_RDONLY
+        }
+        
+        if err := syscall.Mount(mount.Source, dest, mount.Type, flags, mount.Options); err != nil {
+            return fmt.Errorf("failed to mount %s to %s: %v", mount.Source, dest, err)
+        }
+    }
+    
+    return nil
+}
+```
+
+### 4.3 Volume Management
+```go
+func setupVolumes(containerID string, volumes []Volume, rootfs string) error {
+    for _, vol := range volumes {
+        // Create host directory if it doesn't exist
+        if err := os.MkdirAll(vol.HostPath, 0755); err != nil {
+            return fmt.Errorf("failed to create host volume directory: %v", err)
+        }
+        
+        // Create container directory if it doesn't exist
+        containerPath := filepath.Join(rootfs, vol.ContainerPath)
+        if err := os.MkdirAll(containerPath, 0755); err != nil {
+            return fmt.Errorf("failed to create container volume directory: %v", err)
+        }
+        
+        // Bind mount from host to container
+        flags := syscall.MS_BIND
+        if vol.Readonly {
+            flags |= syscall.MS_RDONLY
+        }
+        
+        if err := syscall.Mount(vol.HostPath, containerPath, "", uintptr(flags), ""); err != nil {
+            return fmt.Errorf("failed to mount volume: %v", err)
+        }
+    }
+    
+    return nil
+}
+```
+
+## 5. Process Management
+
+### 5.1 Container Init Process
+```go
+func containerInit(config *Config) error {
+    // This function runs as PID 1 inside the container
+    
+    // Setup signal handling
+    setupSignals()
+    
+    // Execute the container command
+    if err := executeCommand(config.Process.Args, config.Process.Env); err != nil {
+        return fmt.Errorf("failed to execute container command: %v", err)
+    }
+    
+    return nil
+}
+
+func executeCommand(args []string, env []string) error {
+    if len(args) == 0 {
+        return fmt.Errorf("no command specified")
+    }
+    
+    // Find the executable path
+    path, err := exec.LookPath(args[0])
+    if err != nil {
+        return fmt.Errorf("command not found: %v", err)
+    }
+    
+    // Execute the command
+    return syscall.Exec(path, args, env)
+}
+```
+
+### 5.2 Signal Handling
+```go
+func setupSignals() {
+    // Create a channel to receive signals
+    sigs := make(chan os.Signal, 1)
+    
+    // Register for SIGTERM and SIGINT
+    signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
+    
+    // Handle signals in a goroutine
+    go func() {
+        sig := <-sigs
+        fmt.Printf("Received signal: %v\n", sig)
+        
+        // Forward the signal to all processes in the container
+        // In a real implementation, we would need to track child processes
+        
+        // Exit with the appropriate status
+        os.Exit(128 + int(sig.(syscall.Signal)))
+    }()
+}
+```
+
+### 5.3 Process Monitoring
+```go
+func monitorProcesses(containerID string) {
+    // Get the main container process
+    pid, err := getContainerPID(containerID)
+    if err != nil {
+        fmt.Printf("Failed to get container PID: %v\n", err)
+        return
+    }
+    
+    // Wait for the process to exit
+    process, err := os.FindProcess(pid)
+    if err != nil {
+        fmt.Printf("Failed to find process: %v\n", err)
+        return
+    }
+    
+    state, err := process.Wait()
+    if err != nil {
+        fmt.Printf("Error waiting for process: %v\n", err)
+        return
+    }
+    
+    // Update container state
+    updateContainerState(containerID, "stopped", state.ExitCode())
+    
+    // Clean up resources
+    cleanupContainer(containerID)
+}
+
+func getContainerPID(containerID string) (int, error) {
+    // Read the state.json file
+    stateFile := filepath.Join("/var/run/container", containerID, "state.json")
+    data, err := ioutil.ReadFile(stateFile)
+    if err != nil {
+        return 0, fmt.Errorf("failed to read state file: %v", err)
+    }
+    
+    var state State
+    if err := json.Unmarshal(data, &state); err != nil {
+        return 0, fmt.Errorf("failed to parse state file: %v", err)
+    }
+    
+    return state.Pid, nil
+}
+```
+
+## 6. Network Setup
+
+### 6.1 Network Bridge Creation
+```go
+func createNetworkBridge(name string, subnet string) error {
+    // Create a new bridge interface
+    bridge := &netlink.Bridge{
+        LinkAttrs: netlink.LinkAttrs{
+            Name: name,
+        },
+    }
+    
+    // Add the bridge to the network stack
+    if err := netlink.LinkAdd(bridge); err != nil {
+        return fmt.Errorf("failed to create bridge: %v", err)
+    }
+    
+    // Parse the subnet CIDR
+    _, ipNet, err := net.ParseCIDR(subnet)
+    if err != nil {
+        return fmt.Errorf("invalid subnet: %v", err)
+    }
+    
+    // Assign an IP address to the bridge
+    bridgeIP := incrementIP(ipNet.IP)
+    addr := &netlink.Addr{
+        IPNet: &net.IPNet{
+            IP:   bridgeIP,
+            Mask: ipNet.Mask,
+        },
+    }
+    
+    if err := netlink.AddrAdd(bridge, addr); err != nil {
+        return fmt.Errorf("failed to add IP to bridge: %v", err)
+    }
+    
+    // Bring the bridge up
+    if err := netlink.LinkSetUp(bridge); err != nil {
+        return fmt.Errorf("failed to bring bridge up: %v", err)
+    }
+    
+    return nil
+}
+
+func incrementIP(ip net.IP) net.IP {
+    newIP := make(net.IP, len(ip))
+    copy(newIP, ip)
+    
+    for i := len(newIP) - 1; i >= 0; i-- {
+        newIP[i]++
+        if newIP[i] > 0 {
+            break
+        }
+    }
+    
+    return newIP
+}
+```
+
+### 6.2 Container Network Setup
+```go
+func setupContainerNetwork(containerID string, netNsPid int, bridgeName string, subnet string) error {
+    // Create a veth pair
+    vethName := fmt.Sprintf("veth%s", containerID[:8])
+    peerName := fmt.Sprintf("eth0")
+    
+    veth := &netlink.Veth{
+        LinkAttrs: netlink.LinkAttrs{
+            Name: vethName,
+        },
+        PeerName: peerName,
+    }
+    
+    if err := netlink.LinkAdd(veth); err != nil {
+        return fmt.Errorf("failed to create veth pair: %v", err)
+    }
+    
+    // Get the bridge
+    bridge, err := netlink.LinkByName(bridgeName)
+    if err != nil {
+        return fmt.Errorf("failed to find bridge: %v", err)
+    }
+    
+    // Connect veth to bridge
+    if err := netlink.LinkSetMaster(veth, bridge); err != nil {
+        return fmt.Errorf("failed to connect veth to bridge: %v", err)
+    }
+    
+    // Bring veth up
+    if err := netlink.LinkSetUp(veth); err != nil {
+        return fmt.Errorf("failed to bring veth up: %v", err)
+    }
+    
+    // Move peer to container network namespace
+    if err := netlink.LinkSetNsPid(veth.PeerLink, netNsPid); err != nil {
+        return fmt.Errorf("failed to move peer to container ns: %v", err)
+    }
+    
+    // Configure container interface
+    nsHandle, err := netns.GetFromPid(netNsPid)
+    if err != nil {
+        return fmt.Errorf("failed to get network namespace: %v", err)
+    }
+    defer nsHandle.Close()
+    
+    // Execute in container namespace
+    err = netns.Do(nsHandle, func(_ ns.NetNS) error {
+        // Get the peer interface
+        peer, err := netlink.LinkByName(peerName)
+        if err != nil {
+            return fmt.Errorf("failed to find peer in container: %v", err)
+        }
+        
+        // Bring peer up
+        if err := netlink.LinkSetUp(peer); err != nil {
+            return fmt.Errorf("failed to bring peer up: %v", err)
+        }
+        
+        // Assign IP to container interface
+        _, ipNet, err := net.ParseCIDR(subnet)
+        if err != nil {
+            return fmt.Errorf("invalid subnet: %v", err)
+        }
+        
+        containerIP := incrementIP(incrementIP(ipNet.IP)) // Skip bridge IP
+        addr := &netlink.Addr{
+            IPNet: &net.IPNet{
+                IP:   containerIP,
+                Mask: ipNet.Mask,
+            },
+        }
+        
+        if err := netlink.AddrAdd(peer, addr); err != nil {
+            return fmt.Errorf("failed to add IP to container interface: %v", err)
+        }
+        
+        // Add default route
+        route := netlink.Route{
+            Scope:     netlink.SCOPE_UNIVERSE,
+            LinkIndex: peer.Attrs().Index,
+            Gw:        incrementIP(ipNet.IP), // Bridge IP as gateway
+        }
+        
+        if err := netlink.RouteAdd(&route); err != nil {
+            return fmt.Errorf("failed to add default route: %v", err)
+        }
+        
+        return nil
+    })
+    
+    if err != nil {
+        return fmt.Errorf("failed to configure container network: %v", err)
+    }
+    
+    return nil
+}
+```
+
+## 7. Kubernetes Pod Support
+
+### 7.1 Pod Structure Implementation
+```go
+type Pod struct {
+    ID           string
+    Containers   []Container
+    SharedVolumes []Volume
+    NetworkMode  string // "host", "bridge", "none"
+    IPAddress    string
+    Annotations  map[string]string
+}
+
+func createPod(pod *Pod) error {
+    // Create shared namespaces for the pod
+    netNS, err := createNetworkNamespace(pod.ID)
+    if err != nil {
+        return fmt.Errorf("failed to create network namespace: %v", err)
+    }
+    
+    // Create shared volumes
+    if err := setupSharedVolumes(pod); err != nil {
+        return fmt.Errorf("failed to setup shared volumes: %v", err)
+    }
+    
+    // Setup pod network
+    if pod.NetworkMode == "bridge" {
+        if err := setupPodNetwork(pod, netNS); err != nil {
+            return fmt.Errorf("failed to setup pod network: %v", err)
+        }
+    }
+    
+    // Start containers in the pod
+    for i := range pod.Containers {
+        container := &pod.Containers[i]
+        
+        // Set container to use pod's network namespace
+        container.NetworkNamespace = netNS
+        
+        // Start the container
+        if err := startContainer(container); err != nil {
+            return fmt.Errorf("failed to start container %s: %v", container.ID, err)
+        }
+    }
+    
+    return nil
+}
+```
+
+### 7.2 Shared Namespace Management
+```go
+func createNetworkNamespace(podID string) (string, error) {
+    // Create a network namespace file
+    nsPath := filepath.Join("/var/run/netns", podID)
+    
+    // Ensure directory exists
+    if err := os.MkdirAll(filepath.Dir(nsPath), 0755); err != nil {
+        return "", fmt.Errorf("failed to create netns directory: %v", err)
+    }
+    
+    // Create an empty file
+    f, err := os.Create(nsPath)
+    if err != nil {
+        return "", fmt.Errorf("failed to create namespace file: %v", err)
+    }
+    f.Close()
+    
+    // Create a new network namespace
+    cmd := exec.Command("ip", "netns", "add", podID)
+    if err := cmd.Run(); err != nil {
+        return "", fmt.Errorf("failed to create network namespace: %v", err)
+    }
+    
+    return nsPath, nil
+}
+
+func setupSharedVolumes(pod *Pod) error {
+    // Create directories for shared volumes
+    for _, vol := range pod.SharedVolumes {
+        // Create host directory if it doesn't exist
+        if err := os.MkdirAll(vol.HostPath, 0755); err != nil {
+            return fmt.Errorf("failed to create shared volume directory: %v", err)
+        }
+    }
+    
+    return nil
+}
+```
+
+### 7.3 Inter-Container Communication
+```go
+func setupPodNetwork(pod *Pod, netNS string) error {
+    // Setup loopback interface in the pod's network namespace
+    cmd := exec.Command("ip", "netns", "exec", pod.ID, "ip", "link", "set", "lo", "up")
+    if err := cmd.Run(); err != nil {
+        return fmt.Errorf("failed to bring up loopback: %v", err)
+    }
+    
+    // Create a veth pair for the pod
+    vethName := fmt.Sprintf("veth%s", pod.ID[:8])
+    peerName := "eth0"
+    
+    cmd = exec.Command("ip", "link", "add", vethName, "type", "veth", "peer", "name", peerName)
+    if err := cmd.Run(); err != nil {
+        return fmt.Errorf("failed to create veth pair: %v", err)
+    }
+    
+    // Move peer to pod's network namespace
+    cmd = exec.Command("ip", "link", "set", peerName, "netns", pod.ID)
+    if err := cmd.Run(); err != nil {
+        return fmt.Errorf("failed to move peer to pod ns: %v", err)
+    }
+    
+    // Connect veth to bridge
+    cmd = exec.Command("ip", "link", "set", vethName, "master", "cni0")
+    if err := cmd.Run(); err != nil {
+        return fmt.Errorf("failed to connect veth to bridge: %v", err)
+    }
+    
+    // Bring veth up
+    cmd = exec.Command("ip", "link", "set", vethName, "up")
+    if err := cmd.Run(); err != nil {
+        return fmt.Errorf("failed to bring veth up: %v", err)
+    }
+    
+    // Configure pod interface
+    cmd = exec.Command("ip", "netns", "exec", pod.ID, "ip", "link", "set", peerName, "up")
+    if err := cmd.Run(); err != nil {
+        return fmt.Errorf("failed to bring peer up: %v", err)
+    }
+    
+    // Assign IP to pod interface
+    cmd = exec.Command("ip", "netns", "exec", pod.ID, "ip", "addr", "add", pod.IPAddress, "dev", peerName)
+    if err := cmd.Run(); err != nil {
+        return fmt.Errorf("failed to assign IP: %v", err)
+    }
+    
+    // Add default route
+    cmd = exec.Command("ip", "netns", "exec", pod.ID, "ip", "route", "add", "default", "via", "10.244.0.1")
+    if err := cmd.Run(); err != nil {
+        return fmt.Errorf("failed to add default route: %v", err)
+    }
+    
+    return nil
+}
+```
+
+## 8. Integration with Container Ecosystem
+
+### 8.1 Docker Compatibility Layer
+```go
+func runDockerCommand(args []string) error {
+    // Parse Docker-style command
+    if len(args) < 2 || args[0] != "run" {
+        return fmt.Errorf("only 'run' command is supported")
+    }
+    
+    // Extract container options
+    var (
+        image     string
+        command   []string
+        name      string
+        volumes   []string
+        ports     []string
+        envVars   []string
+        memory    string
+        cpus      string
+        detach    bool
+        interactive bool
+        tty       bool
+    )
+    
+    // Parse arguments
+    for i := 1; i < len(args); i++ {
+        switch args[i] {
+        case "-v", "--volume":
+            if i+1 < len(args) {
+                volumes = append(volumes, args[i+1])
+                i++
+            }
+        case "-p", "--
