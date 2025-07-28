@@ -2,7 +2,7 @@ package runtime
 
 import (
 	"encoding/json"
-	"fmt"
+	"
 	"io"
 	"io/ioutil"
 	"os"
@@ -196,8 +196,6 @@ func StartContainer(rootPath, containerID string) error {
 	// In a real implementation, we'd implement the container runtime ourselves
 	// For educational purposes, we'll use runc as a reference
 	//create a new process with container namespaces
-	fmt.Printf("DEBUG: Chroot path: %s\n", spec.Root.Path)
-	fmt.Printf("DEBUG: Process args: %v\n", spec.Process.Args)	
 	cmd := exec.Command(spec.Process.Args[0], spec.Process.Args[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -209,7 +207,6 @@ func StartContainer(rootPath, containerID string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get absolute chroot path: %v", err)
 	}
-	fmt.Printf("DEBUG: Absolute chroot path: %s\n", absChrootPath)
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWUTS | syscall.CLONE_NEWIPC | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWNET,
