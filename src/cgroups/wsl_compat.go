@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"root/container_runtime/src/utils"
+	"github.com/container-runtime/core/utils"
 )
 
 // MockCgroupManager provides a simulated cgroup manager for WSL environments

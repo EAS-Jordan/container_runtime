@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"syscall"
 
-	"root/container_runtime/src/utils"
+	"github.com/container-runtime/core/utils"
 )
 
 // Define namespace types
@@ -204,10 +204,11 @@ func JoinNamespace(nsType int, nsPath string) error {
 	fd := ns.Fd()
 
 	// Join the namespace
-	if err := syscall.Setns(int(fd), nsType); err != nil {
-		return fmt.Errorf("failed to join namespace: %v", err)
+	const SYS_SETNS = 308
+	_, _, errno := syscall.Syscall(SYS_SETNS, uintptr(fd), uintptr(nsType), 0)
+	if errno != 0 {
+		return fmt.Errorf("failed to join namespace: %v", errno)
 	}
-
 	return nil
 }
 

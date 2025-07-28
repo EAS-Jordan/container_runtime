@@ -3,12 +3,14 @@ package runtime
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"syscall"
+	
 )
 
 // Spec represents the OCI runtime specification
@@ -130,6 +132,11 @@ func CreateContainer(bundlePath, rootPath, containerID string) error {
 		return fmt.Errorf("failed to parse config.json: %v", err)
 	}
 
+	// Setup a proper rootfs with essential files
+	if err := setupCompleteRootfs(bundlePath); err != nil {
+		return fmt.Errorf("failed to setup rootfs: %v", err)
+	}
+
 	// Create initial state
 	state := State{
 		Version:     spec.Version,
@@ -188,12 +195,32 @@ func StartContainer(rootPath, containerID string) error {
 	// Execute the runc binary to start the container
 	// In a real implementation, we'd implement the container runtime ourselves
 	// For educational purposes, we'll use runc as a reference
-	cmd := exec.Command("runc", "run", containerID)
-	cmd.Dir = state.Bundle
+	//create a new process with container namespaces
+	fmt.Printf("DEBUG: Chroot path: %s\n", spec.Root.Path)
+	fmt.Printf("DEBUG: Process args: %v\n", spec.Process.Args)	
+	cmd := exec.Command(spec.Process.Args[0], spec.Process.Args[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
+	// Set up the container process
+	// Get absolute path for chroot
+	absChrootPath, err := filepath.Abs(filepath.Join(state.Bundle, spec.Root.Path))
+	if err != nil {
+		return fmt.Errorf("failed to get absolute chroot path: %v", err)
+	}
+	fmt.Printf("DEBUG: Absolute chroot path: %s\n", absChrootPath)
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Cloneflags: syscall.CLONE_NEWUTS | syscall.CLONE_NEWIPC | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWNET,
+		Chroot: absChrootPath,
+		Credential: &syscall.Credential{
+			Uid: spec.Process.User.UID,
+			Gid: spec.Process.User.GID,
+		},
+	}
+
+	// Start the container process
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start container: %v", err)
 	}
@@ -365,3 +392,89 @@ func validateBundle(bundlePath string) error {
 
 	return nil
 }
+// setupCompleteRootfs creates a complete rootfs with essential files
+func setupCompleteRootfs(bundlePath string) error {
+	rootfsPath := filepath.Join(bundlePath, "rootfs")
+
+	// Create essential directories
+	dirs := []string{
+		"bin", "lib", "usr", "etc", "dev", "proc", "sys", "tmp", "var",
+		"lib/aarch64-linux-gnu", // For ARM64 libraries
+	}
+
+	for _, dir := range dirs {
+		path := filepath.Join(rootfsPath, dir)
+		if err := os.MkdirAll(path, 0755); err != nil {
+			return fmt.Errorf("failed to create directory %s: %v", path, err)
+		}
+	}
+
+	// Copy essential binaries and libraries
+	essentials := []struct {
+		src  string
+		dest string
+	}{
+		{"/bin/sh", "bin/sh"},
+		{"/bin/ls", "bin/ls"},
+		{"/bin/cat", "bin/cat"},
+		{"/bin/sleep", "bin/sleep"},
+		{"/bin/pwd", "bin/pwd"},
+		{"/lib/aarch64-linux-gnu/libc.so.6", "lib/aarch64-linux-gnu/libc.so.6"},
+		{"/lib/ld-linux-aarch64.so.1", "lib/ld-linux-aarch64.so.1"},
+	}
+
+	for _, item := range essentials {
+		srcPath := item.src
+		destPath := filepath.Join(rootfsPath, item.dest)
+
+		// Check if source exists
+		if _, err := os.Stat(srcPath); os.IsNotExist(err) {
+			fmt.Printf("Warning: %s not found, skipping\n", srcPath)
+			continue
+		}
+
+		// Copy file
+		if err := copyFile(srcPath, destPath); err != nil {
+			return fmt.Errorf("failed to copy %s: %v", srcPath, err)
+		}
+	}
+
+	return nil
+}
+
+// copyFile copies a file from src to dest
+func copyFile(src, dest string) error {
+	// Create parent directories
+	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+		return fmt.Errorf("failed to create parent directories: %v", err)
+	}
+
+	// Open source file
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("failed to open source file: %v", err)
+	}
+	defer srcFile.Close()
+
+	// Create destination file
+	destFile, err := os.Create(dest)
+	if err != nil {
+		return fmt.Errorf("failed to create destination file: %v", err)
+	}
+	defer destFile.Close()
+
+	// Copy content
+	if _, err := io.Copy(destFile, srcFile); err != nil {
+		return fmt.Errorf("failed to copy file content: %v", err)
+	}
+
+	// Preserve permissions
+	if stat, err := srcFile.Stat(); err == nil {
+		if err := destFile.Chmod(stat.Mode()); err != nil {
+			return fmt.Errorf("failed to set file permissions: %v", err)
+		}
+	}
+
+	return nil
+}
+

@@ -5,8 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-
-	"root/container_runtime/src/utils"
+	"github.com/container-runtime/core/utils"
 )
 
 // setupWSLNetwork provides a simplified network setup for WSL environments

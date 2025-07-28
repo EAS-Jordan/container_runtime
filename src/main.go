@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"root/container_runtime/src/runtime"
+	"github.com/container-runtime/core/runtime"
 )
 
 func main() {
@@ -29,9 +29,15 @@ func main() {
 		action = args[0]
 	}
 
+	//Debug: print the detected action
+	fmt.Printf("DEBUG: Action detected: '%s'\n", action)
+	fmt.Printf("DEBUG: Bundle path: '%s'\n", bundlePath)
+	fmt.Printf("DEBUG: Action == 'create': %t\n", action == "create")
+	fmt.Printf("DEBUG: BundlePath == '': %t\n", bundlePath == "")
+
 	// Ensure required flags are provided
-	if action != "state" && action != "delete" && bundlePath == "" {
-		fmt.Println("Bundle path is required")
+	if action == "create" && bundlePath == "" {
+		fmt.Println("Bundle path is required for create action")
 		os.Exit(1)
 	}
 

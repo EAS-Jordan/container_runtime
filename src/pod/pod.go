@@ -6,9 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-
-	"root/container_runtime/src/cgroups"
-	"root/container_runtime/src/network"
+	"github.com/container-runtime/core/cgroups"
+	"github.com/container-runtime/core/network"
 )
 
 // Pod represents a Kubernetes-like pod
